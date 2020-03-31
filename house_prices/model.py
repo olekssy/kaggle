@@ -8,32 +8,110 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import train_test_split
+import sklearn
+import scipy
+import xgboost
 
 
-def get_features(data):
-    selectFeatures = ['MSSubClass', 'LotFrontage', 'LotArea', 'MiscVal', 'MoSold', 'YrSold']
-    dataX = data[selectFeatures]
-    dataX = dataX.fillna(0)
-    return dataX
+# -------------------- Assumptions --------------------
+# Feature labels
+labelTarget = 'SalePrice'
+labelCathegory = ('FireplaceQu', 'BsmtQual', 'BsmtCond', 'MiscFeature', 'GarageQual', 'GarageType', 'GarageCond', 'ExterQual', 'ExterCond', 'HeatingQC', 'PoolQC', 'KitchenQual', 'BsmtFinType1', 'BsmtFinType2', 'Functional', 'Fence', 'BsmtExposure', 'GarageFinish', 'LandSlope', 'LotShape', 'PavedDrive', 'Street', 'Alley', 'CentralAir', 'MSSubClass', 'MasVnrType', 'OverallCond', 'YrSold', 'MoSold')
+labelNumerical = ('GarageYrBlt', 'GarageArea', 'GarageCars', 'BsmtFinSF1', 'BsmtFinSF2', 'BsmtUnfSF','TotalBsmtSF', 'BsmtFullBath', 'BsmtHalfBath', 'MasVnrArea')
+labelReal = ('MSZoning', 'Electrical', 'KitchenQual', 'Exterior1st', 'Exterior2nd', 'SaleType')
 
 
-def run_training(trainX, trainY):
-    model = LinearRegression()
-    model.fit(trainX.values.reshape(-1, trainX.shape[1]), trainY)
-    score = model.score(trainX, trainY)
-    print('R^2 train = {:4.2f}'.format(score))
+# -------------------- Helper functions --------------------
+def bootstrap_nans(data, labelCathegory=labelCathegory, labelNumerical=labelNumerical, labelReal=labelReal):
+    """ Interpolate missing data """
+    labelAll = labelCathegory + labelNumerical + labelReal
+    for k in labelAll:
+        if k in labelCathegory:
+            data[k] = data[k].fillna('None')
+        elif k in labelNumerical:
+            data[k] = data[k].fillna(0)
+        elif k in labelReal:
+            data[k] = data[k].fillna(data[k].mode()[0])
+    # treat special cases
+    data = data.drop(['Utilities'], axis=1)
+    data["Functional"] = data["Functional"].fillna("Typ")
+    data["LotFrontage"] = data.groupby("Neighborhood")["LotFrontage"].transform(lambda x: x.fillna(x.median()))
+    return data
+
+
+def boxcox_transform(data, maxSkew=0.75, _lambda=0.15):
+    """ Transform skewed features via Box Cox """
+    num_keys = data.dtypes[data.dtypes != 'object'].index
+    skewed_features = data[num_keys].apply(lambda x: scipy.stats.skew(x.dropna())).sort_values(ascending=False)
+    skewness = pd.DataFrame({'Skew': skewed_features})
+    skewness = skewness[abs(skewness) > maxSkew]
+    skewed_features = skewness.index
+    for feat in skewed_features:
+        data[feat] = scipy.special.boxcox1p(data[feat], _lambda)
+    return data
+
+
+def transform_data(data):
+    """ Transform numerical features into cathegorical, add meta-features """
+    # cathegorical data transform
+    data['MSSubClass'] = data['MSSubClass'].apply(str)
+    data['OverallCond'] = data['OverallCond'].astype(str)
+    data['YrSold'] = data['YrSold'].astype(str)
+    data['MoSold'] = data['MoSold'].astype(str)
+    # add meta-feature
+    data['TotalSF'] = data['TotalBsmtSF'] + data['1stFlrSF'] + data['2ndFlrSF']
+    return data
+
+
+def normalize(data):
+    """ Normalize Y distribution, remove anomalies """
+    try:
+        # lognormalize labelTarget variable
+        data[labelTarget] = np.log1p(data[labelTarget])
+        # remove outliers
+        data = data.drop(data[(data['GrLivArea']>4000) & (data[labelTarget]<300000)].index)
+    except KeyError:
+        pass
+    return data
+
+
+def cathegory_encoder(data, labelCathegory=labelCathegory):
+    """ Encode cathegorical labels """
+    for k in labelCathegory:
+        encoder = sklearn.preprocessing.LabelEncoder()
+        encoder.fit(list(data[k].values)) 
+        data[k] = encoder.transform(list(data[k].values))
+    return data
+
+
+# -------------------- Feature settings --------------------
+def prepare_data(data):
+    """ Feature engineering pipeline """
+    data = bootstrap_nans(data)  # fill missing values
+    data = transform_data(data)  # transform select numerical data into cathegorical
+    data = cathegory_encoder(data)  # encode cathegorical features
+    data = boxcox_transform(data)  # box cox transform skewed features
+    data = pd.get_dummies(data)  # convert cathegorical features
+    return data
+
+
+# -------------------- Training settings --------------------
+def xgboost_regression(dataX, dataY):
+    model = xgboost.XGBRegressor(
+                        objective='reg:squarederror',
+                        booter='gbtree',
+                        tree_method='exact',
+                        colsample_bytree=0.5,
+                        learning_rate=0.01,
+                        max_depth=3,
+                        reg_alpha=0.01,
+                        reg_gamma=0.01,
+                        n_estimators=2000)
+    model.fit(dataX.values.reshape(-1, dataX.shape[1]), dataY)
     pickle.dump(model, open('model.pickle', 'wb'))
 
 
-def run_test(testX, testY):
-    model = pickle.load(open('model.pickle', 'rb'))
-    # predict
-    score = model.score(testX.values.reshape(-1, testX.shape[1]), testY)
-    print('R^2 test = {:4.2f}'.format(score))
-
-
+# -------------------- Testing settings --------------------
 def predict(dataX):
     # load model
     model = pickle.load(open('model.pickle', 'rb'))
@@ -42,10 +120,20 @@ def predict(dataX):
     return predY
 
 
-def get_submission(dataX):
+def run_test(dataX, dataY):
+    # predict
+    # lognormalize data and predict
+    dataY = dataY
     predY = predict(dataX)
+    RMSE = np.sqrt(sklearn.metrics.mean_squared_error(dataY, predY))
+    print('RMSE = {:4.2f}'.format(RMSE))
+
+
+# -------------------- Submission settings --------------------
+def get_submission(dataX):
+    predY = np.expm1(predict(dataX))
     # write to csv
-    result = pd.DataFrame({'SalePrice': predY}, index=dataX.index)
+    result = pd.DataFrame({labelTarget: predY}, index=dataX.index)
     result.to_csv('submission.csv', index=True)
     print('Submission saved.')
 
@@ -55,20 +143,28 @@ def main():
     dataTrain = pd.read_csv('train.csv', index_col='Id', header=0)
     dataTest = pd.read_csv('test.csv', index_col='Id', header=0)
 
-    # prepare data, split train/test
-    dataX = get_features(dataTrain)
-    dataY = dataTrain['SalePrice']
-    trainX, testX, trainY, testY = train_test_split(dataX, dataY, test_size=0.2)
+    # prepare data
+    dataTrain = normalize(dataTrain)  # normalize data, remove outliers
+    dataTrainY = dataTrain[labelTarget]  # select Y
+    
+    dataAll = pd.concat((dataTrain, dataTest)).reset_index(drop=True)
+    dataAll = prepare_data(dataAll)
+    
+    # split prepared features into train/test samples
+    dataTrainX = dataAll[dataAll[labelTarget].notnull()]
+    dataTrainX = dataTrainX.drop([labelTarget], axis=1)
+    dataTestX = dataAll[dataAll[labelTarget].isnull()]
+    dataTestX = dataTestX.drop([labelTarget], axis=1)
 
-    # train model
-    run_training(trainX, trainY)
+    # split train/test
+    trainX, testX, trainY, testY = sklearn.model_selection.train_test_split(dataTrainX, dataTrainY, test_size=0.2)
 
-    # test model
+    # train, test model
+    xgboost_regression(trainX, trainY)
     run_test(testX, testY)
 
     # get submission
-    dataX = get_features(dataTest)
-    get_submission(dataX)
+    get_submission(dataTestX)
 
 
 if __name__ == '__main__':
