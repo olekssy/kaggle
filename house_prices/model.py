@@ -98,23 +98,25 @@ def prepare_data(data):
 # -------------------- Training settings --------------------
 def xgboost_regression(dataX, dataY):
     model = xgboost.XGBRegressor(
-                        objective='reg:squarederror',
-                        booter='gbtree',
-                        tree_method='exact',
-                        colsample_bytree=0.5,
-                        learning_rate=0.01,
-                        max_depth=3,
-                        reg_alpha=0.01,
-                        reg_gamma=0.01,
-                        n_estimators=2000)
+        objective='reg:squarederror',
+        booter='gblinear',
+        tree_method='exact',
+        colsample_bytree=0.5,
+        subsample=0.5,
+        learning_rate=0.05,
+        max_depth=3,
+        reg_alpha=0.05,
+        reg_gamma=0.05,
+        reg_lambda=0.05,
+        n_estimators=2000)
     model.fit(dataX.values.reshape(-1, dataX.shape[1]), dataY)
-    pickle.dump(model, open('model.pickle', 'wb'))
+    pickle.dump(model, open('xgb_model.pickle', 'wb'))
 
 
 # -------------------- Testing settings --------------------
 def predict(dataX):
     # load model
-    model = pickle.load(open('model.pickle', 'rb'))
+    model = pickle.load(open('xgb_model.pickle', 'rb'))
     # predict
     predY = model.predict(dataX.values.reshape(-1, dataX.shape[1]))
     return predY
@@ -123,10 +125,9 @@ def predict(dataX):
 def run_test(dataX, dataY):
     # predict
     # lognormalize data and predict
-    dataY = dataY
     predY = predict(dataX)
     RMSE = np.sqrt(sklearn.metrics.mean_squared_error(dataY, predY))
-    print('RMSE = {:4.2f}'.format(RMSE))
+    print('RMSE = {:4.4f}'.format(RMSE))
 
 
 # -------------------- Submission settings --------------------
@@ -134,6 +135,7 @@ def get_submission(dataX):
     predY = np.expm1(predict(dataX))
     # write to csv
     result = pd.DataFrame({labelTarget: predY}, index=dataX.index)
+    # print(result)
     result.to_csv('submission.csv', index=True)
     print('Submission saved.')
 
@@ -145,18 +147,16 @@ def main():
 
     # prepare data
     dataTrain = normalize(dataTrain)  # normalize data, remove outliers
-    dataTrainY = dataTrain[labelTarget]  # select Y
-    
-    dataAll = pd.concat((dataTrain, dataTest)).reset_index(drop=True)
+    dataAll = pd.concat((dataTrain, dataTest))
     dataAll = prepare_data(dataAll)
     
     # split prepared features into train/test samples
-    dataTrainX = dataAll[dataAll[labelTarget].notnull()]
-    dataTrainX = dataTrainX.drop([labelTarget], axis=1)
-    dataTestX = dataAll[dataAll[labelTarget].isnull()]
-    dataTestX = dataTestX.drop([labelTarget], axis=1)
+    dataTrainProc = dataAll[dataAll[labelTarget].notnull()]
+    dataTestProc = dataAll[dataAll[labelTarget].isnull()].drop([labelTarget], axis=1)
 
     # split train/test
+    dataTrainX = dataTrainProc.drop([labelTarget], axis=1)  # select X
+    dataTrainY = dataTrain[labelTarget]  # select Y
     trainX, testX, trainY, testY = sklearn.model_selection.train_test_split(dataTrainX, dataTrainY, test_size=0.2)
 
     # train, test model
@@ -164,7 +164,7 @@ def main():
     run_test(testX, testY)
 
     # get submission
-    get_submission(dataTestX)
+    get_submission(dataTestProc)
 
 
 if __name__ == '__main__':
