@@ -1,3 +1,4 @@
 *.pickle
 submission*
 .vscode
+.DS_Store
