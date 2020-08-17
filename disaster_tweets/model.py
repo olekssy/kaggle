@@ -19,6 +19,8 @@ import nltk
 import xgboost
 import sklearn
 import sklearn.feature_selection
+from sklearn.model_selection import KFold
+from sklearn.model_selection import cross_validate
 
 
 # --------------------- Helper functions ---------------------
@@ -102,20 +104,20 @@ def set_vectorizer(dataX):
         analyzer = 'word',
         min_df = 1)
     vectorized_vocabulary = vectorizer.fit(dataX)
-    pickle.dump(vectorized_vocabulary, open('vectorized_vocabulary.pickle', 'wb'))
+    pickle.dump(vectorized_vocabulary, open('vocabulary.pickle', 'wb'))
 
     dataX = vectorized_vocabulary.transform(dataX)
     return dataX
 
 
 # ------------------------ Model settings ------------------------
-def train_xgboost(trainX, trainY):
+def train_model(trainX, trainY):
     # vectorize text features
     trainX = set_vectorizer(trainX)
     trainX = trainX.reshape(-1, trainX.shape[1])
     print('Vocab vector train', trainX.shape)
 
-    selector = sklearn.feature_selection.SelectKBest(sklearn.feature_selection.f_classif, k=min(5000, trainX.shape[1]))
+    selector = sklearn.feature_selection.SelectKBest(sklearn.feature_selection.f_classif, k=min(15000, trainX.shape[1]))
     selector.fit(trainX, trainY)
     pickle.dump(selector, open('selector.pickle', 'wb'))
     trainX = selector.transform(trainX)  #.astype('float32')
@@ -123,22 +125,22 @@ def train_xgboost(trainX, trainY):
 
     # booster: gbtree, gblinear, dart.
     model = xgboost.XGBClassifier(
-        max_depth=3, 
+        max_depth=3,
         learning_rate=0.05,
         colsample_bytree=0.5,
-        booster='gbtree', 
-        tree_method='exact', 
+        booster='gbtree',
+        tree_method='exact',
         reg_alpha=0.05,
-        reg_gamma=0.005, 
-        reg_lambda=0.5, 
+        reg_gamma=0.005,
+        reg_lambda=0.5,
         n_estimators=5000)
     model.fit(trainX, trainY)
-    pickle.dump(model, open('xgb_model.pickle', 'wb'))
+    pickle.dump(model, open('model.pickle', 'wb'))
 
 
 def predict(dataX):
     # vectorize text features
-    vectorized_vocabulary = pickle.load(open('vectorized_vocabulary.pickle', 'rb'))
+    vectorized_vocabulary = pickle.load(open('vocabulary.pickle', 'rb'))
     dataX = vectorized_vocabulary.transform(dataX)
     print('Vocab vector predict', dataX.shape)
 
@@ -147,19 +149,44 @@ def predict(dataX):
     print('Reduced vector predict', dataX.shape)
 
     # load model
-    model = pickle.load(open('xgb_model.pickle', 'rb'))
+    model = pickle.load(open('model.pickle', 'rb'))
     # predict
     predY = model.predict(dataX)
     return predY
 
 
-def run_test(testX, testY):
+def cross_validate_model(trainX, trainY, n_splits=4):
+    """ K-folds cross-validation """
+    # load model, vocabulary, selector
+    model = pickle.load(open('model.pickle', 'rb'))
+    vectorized_vocabulary = pickle.load(open('vocabulary.pickle', 'rb'))
+    selector = pickle.load(open('selector.pickle', 'rb'))
+
+    # vectorize text features
+    trainX = vectorized_vocabulary.transform(trainX)
+    trainX = selector.transform(trainX).astype('float32')
+
+    # set splits, compute scores
+    k_folds = KFold(n_splits=n_splits, shuffle=True)
+    scores = cross_validate(model, trainX, trainY, cv=k_folds, scoring=('f1_weighted', 'roc_auc_ovo_weighted'))
+
+    # get metrics
+    f1 = scores['test_f1_weighted'].mean()
+    roc_auc = scores['test_roc_auc_ovo_weighted'].mean()
+
+    print('=== Cross-validate model ===')
+    print(f'F1 (1.0 is the best) = {f1:4.4f}')
+    print(f'ROC AUC (1.0 is the best) = {roc_auc:4.4f}')
+    print(f'N-folds = {n_splits}\n')
+
+
+def test_model(testX, testY):
     predY = predict(testX)
     # model metrics
     confMatrix = sklearn.metrics.confusion_matrix(testY, predY)
     report = sklearn.metrics.classification_report(testY, predY)
-    print(confMatrix)
     print(report)
+    print(confMatrix)
 
 
 # --------------------- Submission settings ---------------------
@@ -183,12 +210,12 @@ def main():
 
     trainX, testX, trainY, testY = sklearn.model_selection.train_test_split(dataX, dataY, test_size=0.2)
 
-    train_xgboost(trainX, trainY)
-    run_test(testX, testY)
+    train_model(trainX, trainY)
+    cross_validate_model(trainX, trainY, n_splits=4)
+    test_model(testX, testY)
 
-    # predict test
-    # 
-    # get_submission(dataX)
+    # predict
+    get_submission(data_test)
 
 
 if __name__ == '__main__':
